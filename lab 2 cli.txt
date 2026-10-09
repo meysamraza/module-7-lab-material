@@ -1,6 +1,39 @@
+LAB 2 - AWS LOG & SNAPSHOT INVESTIGATION
+CLI COMMANDS: STUDENT VERSION (PLACEHOLDERS) + INSTRUCTOR VALUES
+
+Where to run each step:
+  [COMPROMISED]  SSH into the compromised EC2
+  [FORENSIC]     SSH into the forensic EC2
+  [CLOUDSHELL]   AWS Console CloudShell (admin identity)
+
+Each command is shown twice:
+  STUDENT ..... placeholders in <ANGLE_BRACKETS>, fill with your own values
+  MY VALUES ... same command with the instructor's real values
+
+
+
+Notes:
+- Device names change per instance. Always run lsblk before mounting.
+- Never write to the evidence disk. Always mount with ro.
+- All times must be UTC so logs and disk match.
+
+
 ======================================================
-STEP 1. [COMPROMISED] RUN HARMLESS ACTIONS
+STEP 0. CONSOLE: CREATE THE TRAIL (NO CLI)
 ======================================================
+// CloudTrail -> Trails -> Create trail
+//   Name: <TRAIL_NAME>
+//   Storage: new S3 bucket (note its name = <LOG_BUCKET>)
+//   Log file validation: ENABLED
+//   SSE-KMS, SNS, CloudWatch Logs: DISABLED
+//   Management events: Read + Write. Data / Insights / Network: DISABLED
+// Do this BEFORE any activity, or actions will not be logged.
+
+
+======================================================
+STEP 1. [COMPROMISED] RUN HARMLESS "ATTACKER" ACTIONS
+======================================================
+STUDENT:
 date -u
 echo "lab2-test-file" > /home/ec2-user/lab2_note.txt
 aws sts get-caller-identity
@@ -8,106 +41,213 @@ aws s3 ls
 date -u
 exit
 
+MY VALUES: same (no placeholders).
+
+# date -u ............. UTC time before and after = your time window
+# echo > file ......... creates a disk artifact with a timestamp
+# get-caller-identity . logs a GetCallerIdentity event
+# aws s3 ls ........... logs ListBuckets (AccessDenied is expected)
+# exit ................ writes commands into .bash_history
+
+
+======================================================
+STEP 2. CONSOLE: FRESH SNAPSHOT, VOLUME, ATTACH (NO CLI)
+======================================================
+// Volumes -> select compromised volume -> Create snapshot
+// Snapshots -> Create volume from snapshot (same AZ as forensic EC2)
+// Volumes -> Attach volume to the forensic EC2
+// Take a NEW snapshot. An old one will not contain today's activity.
+
 
 ======================================================
 STEP 3. [FORENSIC] FIND THE NEW DISK
 ======================================================
+
 lsblk
 
-# New 8G disk with its own partition = Lab 2 copy (e.g. nvme3n1p1)
+# New 8G disk with its own partition = the Lab 2 copy.
+# Write its partition name here: <LAB2_PARTITION> = ____________
 
 
 ======================================================
 STEP 4. [FORENSIC] MOUNT READ-ONLY
 ======================================================
+
 sudo mkdir -p /mnt/lab2
-sudo mount -t xfs -o ro,nouuid /dev/nvme3n1p1 /mnt/lab2
+sudo mount -t xfs -o ro,nouuid /dev/<LAB2_PARTITION> /mnt/lab2
 ls /mnt/lab2/home/ec2-user
 
-# ro = read-only. nouuid = bypasses duplicate UUID error (disk is a root copy)
-# You should see lab2_note.txt
+
+sudo mkdir -p /mnt/lab2
+sudo mount -t xfs -o ro,nouuid /dev/nvme1n1p1 /mnt/lab2
+ls /mnt/lab2/home/ec2-user
+
+# ro = read-only. nouuid = bypasses duplicate UUID error (disk is a root copy).
+# You should see lab2_note.txt.
 
 
 ======================================================
-STEP 6. [CLOUDSHELL] DOWNLOAD CLOUDTRAIL LOGS
+STEP 5. [CLOUDSHELL] DOWNLOAD CLOUDTRAIL LOGS
 ======================================================
-mkdir -p ~/ct && cd ~/ct
-aws s3 sync s3://aws-cloudtrail-logs-611182198012-e424f860/AWSLogs/611182198012/CloudTrail/eu-north-1/2026/10/04/ .
+
+cd ~
+mkdir -p ct2 && cd ct2
+aws s3 sync s3://<LOG_BUCKET>/AWSLogs/<ACCOUNT_ID>/CloudTrail/<REGION>/<YYYY>/<MM>/<DD>/ .
 ls
 
+
+cd ~
+mkdir -p ct2 && cd ct2
+aws s3 sync s3://forensics-aws-cloudtrail-logs-611182198012-ef944ef8/AWSLogs/611182198012/CloudTrail/eu-north-1/2026/10/09/ .
+ls
+
+# Use a fresh folder (ct2) so old logs do not mix with this run.
 # Logs arrive in S3 5-15 min after the activity. Empty = wait and rerun.
 # Run in CloudShell, not on the instance (instance role is upload-only).
 
+# If old files landed in the wrong folder, separate them:
+
+mkdir -p ~/ct2
+mv ~/ct/*<YYYY><MM><DD>*.json.gz ~/ct2/
+# MY VALUES:
+
+mv ~/ct/*20261009*.json.gz ~/ct2/
+
 
 ======================================================
-STEP 7. [CLOUDSHELL] FILTER LOGS BY IDENTITY WITH JQ
+STEP 6. [CLOUDSHELL] FILTER LOGS BY IDENTITY WITH JQ
 ======================================================
+
+cd ~/ct2
+zcat *.json.gz | jq -r '.Records[] | select((.userIdentity.arn // "") | contains("<COMPROMISED_INSTANCE_ID>")) | [.eventTime, .eventSource, .eventName, (.errorCode // "OK")] | @tsv'
+
+
+cd ~/ct2
 zcat *.json.gz | jq -r '.Records[] | select((.userIdentity.arn // "") | contains("i-06401ca7d998be4b9")) | [.eventTime, .eventSource, .eventName, (.errorCode // "OK")] | @tsv'
 
 # Output columns: time (UTC), service, API call, OK or error code
-# Expect: GetCallerIdentity OK, ListBuckets AccessDenied
 
-# Optional filters:
-# By event source:
 
+Optional filter - by event source (no placeholders):
 zcat *.json.gz | jq -r '.Records[] | select(.eventSource=="s3.amazonaws.com") | [.eventTime, .eventName, (.errorCode // "OK")] | @tsv'
 
-# Failed calls only:
-
+Optional filter - failed calls only (no placeholders):
 zcat *.json.gz | jq -r '.Records[] | select(.errorCode != null) | [.eventTime, .eventName, .errorCode] | @tsv'
 
+# Note: one log holds many identities. Console browsing by an admin
+# (GetBucketAcl, etc.) is noise. Filtering by identity separates it.
 
-======================================================
-STEP 8. [CLOUDSHELL] VALIDATE LOG INTEGRITY
-======================================================
-aws cloudtrail validate-logs --trail-arn arn:aws:cloudtrail:eu-north-1:611182198012:trail/forensics-management-events --start-time 2026-10-04T13:00:00Z --verbose
-
-# "digest files valid" = no log file modified or deleted in that window
-# Digest files arrive hourly. Newest logs may not be covered yet.
-# Rerun later with --start-time of your activity hour to cover them.
+Write what you found:
+  Time (UTC) ________  Event ____________  Result ________
+  Time (UTC) ________  Event ____________  Result ________
 
 
 ======================================================
-STEP 9. [FORENSIC] DISK ARTIFACTS WITH UTC TIMESTAMPS
+STEP 7. [CLOUDSHELL] VALIDATE LOG INTEGRITY
+======================================================
+
+aws cloudtrail validate-logs --trail-arn arn:aws:cloudtrail:<REGION>:<ACCOUNT_ID>:trail/<TRAIL_NAME> --start-time <START_UTC> --verbose
+
+
+aws cloudtrail validate-logs --trail-arn arn:aws:cloudtrail:eu-north-1:611182198012:trail/trail-compromised --start-time 2026-10-09T01:00:00Z --verbose
+
+# "digest files valid" = no log file modified or deleted in that window.
+# Digest files are written hourly. Your newest logs may not be covered yet.
+# Rerun after the next hour, with --start-time set to the hour of your activity.
+
+Result:  ___ / ___ digest files valid     Covered up to (UTC) ________
+
+
+======================================================
+STEP 8. [FORENSIC] DISK ARTIFACTS WITH UTC TIMESTAMPS
 ======================================================
 
 sudo TZ=UTC stat -c '%y  %n' /mnt/lab2/home/ec2-user/lab2_note.txt /mnt/lab2/home/ec2-user/.bash_history
-sudo cat /mnt/lab2/home/ec2-user/.bash_history | tail -10
+sudo grep -n "get-caller-identity\|s3 ls" /mnt/lab2/home/ec2-user/.bash_history
+sudo tail -10 /mnt/lab2/home/ec2-user/.bash_history
 
-# TZ=UTC makes times match CloudTrail
-# lab2_note.txt time = file creation
-# .bash_history time = session close, not per-command time
+# TZ=UTC makes times match CloudTrail.
+# lab2_note.txt time = file creation.
+# .bash_history time = session close, not per-command time.
+# grep may return lines from earlier sessions (instance reused).
+# Separate sessions by the date -u markers and position in the file.
+
+Write what you found:
+  lab2_note.txt created (UTC) ________
+  .bash_history written (UTC) ________
+  History lines for this run: ________
+
+
+======================================================
+STEP 9. CROSS-REFERENCE: LOG EVENT vs DISK ARTIFACT
+======================================================
+Match on three checks, all in UTC:
+  1. Same action   (GetCallerIdentity = aws sts get-caller-identity)
+  2. Same time     (within 1-2 seconds, not exact)
+  3. Same identity (instance role on the compromised instance)
 
 
 ======================================================
 STEP 10. [CLOUDSHELL] HASH THE CLOUDTRAIL LOGS
 ======================================================
 
-cd ~/ct
+cd ~/ct2
 sha256sum *.json.gz | tee ct_logs.sha256
+
+# Hashes saved to ct_logs.sha256 for chain of custody.
 
 
 ======================================================
 STEP 11. [FORENSIC] HASH THE LAB 2 DISK COPY
 ======================================================
 
-sudo sha256sum /dev/nvme3n1p1 | tee /home/ec2-user/lab2_disk.sha256
+sudo sha256sum /dev/<LAB2_PARTITION> | tee /home/ec2-user/lab2_disk.sha256
 
-# Takes about 1 minute
+
+sudo sha256sum /dev/nvme1n1p1 | tee /home/ec2-user/lab2_disk.sha256
+
+# Takes about 1 minute.
+Disk hash: ________________________________________
 
 
 ======================================================
 STEP 12. [FORENSIC] UPLOAD DISK HASH TO LOCKED BUCKET
 ======================================================
 
+sudo aws s3 cp /home/ec2-user/lab2_disk.sha256 s3://<EVIDENCE_BUCKET>/lab2/
+
+
 sudo aws s3 cp /home/ec2-user/lab2_disk.sha256 s3://test-buck-611182198012/lab2/
 
-# Needs IAM role with s3:PutObject on the evidence bucket
+# Needs an IAM role with s3:PutObject on the evidence bucket.
 
 
 ======================================================
 STEP 13. [CLOUDSHELL] UPLOAD LOGS + HASH FILE
 ======================================================
 
-cd ~/ct
+cd ~/ct2
+aws s3 cp . s3://<EVIDENCE_BUCKET>/lab2/cloudtrail/ --recursive
+
+
+cd ~/ct2
 aws s3 cp . s3://test-buck-611182198012/lab2/cloudtrail/ --recursive
+
+# Use ct2 (this run only). Uploading the old ct folder would add stale evidence.
+
+
+======================================================
+STEP 14. FINDINGS REPORT (STUDENT FILLS)
+======================================================
+# | CloudTrail event | Time UTC | Identity | Result | Disk artifact | Disk time UTC | Match
+1 | ____________     | ________ | ________ | ______ | ____________  | ____________  | _____
+2 | ____________     | ________ | ________ | ______ | ____________  | ____________  | _____
+3 | ____________     | ________ | ________ | ______ | ____________  | ____________  | _____
+4 | ____________     | ________ | ________ | ______ | ____________  | ____________  | _____
+
+Findings (2-3 lines):
+______________________________________________________________
+______________________________________________________________
+
+Integrity: digest valid up to (UTC) ________   Re-validated at (UTC) ________
+
