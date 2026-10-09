@@ -1,0 +1,39 @@
+1. Download avml
+ 
+curl -LO https://github.com/microsoft/avml/releases/latest/download/avml
+chmod +x avml
+	
+
+2. Capture memory
+
+sudo ./avml acquire /home/ec2-user/mem_capture.lime
+
+
+3. Verify file created
+ 
+ls -la /home/ec2-user/mem_capture.lime
+
+
+4. Peek at first 200 bytes
+
+sudo head -c 200 /home/ec2-user/mem_capture.lime | xxd
+
+
+5. Hash the dump (save this value)
+ 
+sudo sha256sum /home/ec2-user/mem_capture.lime
+
+
+6. Upload dump to S3
+ 
+sudo aws s3 cp /home/ec2-user/mem_capture.lime s3://buck_name_here/
+
+
+7. Save hash to file
+ 
+sudo sh -c 'echo "<hash here>  mem_capture.lime" > /home/ec2-user/mem_capture.sha256'
+
+
+8. Upload hash file to S3
+ 
+sudo aws s3 cp /home/ec2-user/mem_capture.sha256 s3://buck_name_here/

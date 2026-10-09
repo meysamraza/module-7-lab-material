@@ -1,0 +1,113 @@
+======================================================
+STEP 1. [COMPROMISED] RUN HARMLESS ACTIONS
+======================================================
+date -u
+echo "lab2-test-file" > /home/ec2-user/lab2_note.txt
+aws sts get-caller-identity
+aws s3 ls
+date -u
+exit
+
+
+======================================================
+STEP 3. [FORENSIC] FIND THE NEW DISK
+======================================================
+lsblk
+
+# New 8G disk with its own partition = Lab 2 copy (e.g. nvme3n1p1)
+
+
+======================================================
+STEP 4. [FORENSIC] MOUNT READ-ONLY
+======================================================
+sudo mkdir -p /mnt/lab2
+sudo mount -t xfs -o ro,nouuid /dev/nvme3n1p1 /mnt/lab2
+ls /mnt/lab2/home/ec2-user
+
+# ro = read-only. nouuid = bypasses duplicate UUID error (disk is a root copy)
+# You should see lab2_note.txt
+
+
+======================================================
+STEP 6. [CLOUDSHELL] DOWNLOAD CLOUDTRAIL LOGS
+======================================================
+mkdir -p ~/ct && cd ~/ct
+aws s3 sync s3://aws-cloudtrail-logs-611182198012-e424f860/AWSLogs/611182198012/CloudTrail/eu-north-1/2026/10/04/ .
+ls
+
+# Logs arrive in S3 5-15 min after the activity. Empty = wait and rerun.
+# Run in CloudShell, not on the instance (instance role is upload-only).
+
+
+======================================================
+STEP 7. [CLOUDSHELL] FILTER LOGS BY IDENTITY WITH JQ
+======================================================
+zcat *.json.gz | jq -r '.Records[] | select((.userIdentity.arn // "") | contains("i-06401ca7d998be4b9")) | [.eventTime, .eventSource, .eventName, (.errorCode // "OK")] | @tsv'
+
+# Output columns: time (UTC), service, API call, OK or error code
+# Expect: GetCallerIdentity OK, ListBuckets AccessDenied
+
+# Optional filters:
+# By event source:
+
+zcat *.json.gz | jq -r '.Records[] | select(.eventSource=="s3.amazonaws.com") | [.eventTime, .eventName, (.errorCode // "OK")] | @tsv'
+
+# Failed calls only:
+
+zcat *.json.gz | jq -r '.Records[] | select(.errorCode != null) | [.eventTime, .eventName, .errorCode] | @tsv'
+
+
+======================================================
+STEP 8. [CLOUDSHELL] VALIDATE LOG INTEGRITY
+======================================================
+aws cloudtrail validate-logs --trail-arn arn:aws:cloudtrail:eu-north-1:611182198012:trail/forensics-management-events --start-time 2026-10-04T13:00:00Z --verbose
+
+# "digest files valid" = no log file modified or deleted in that window
+# Digest files arrive hourly. Newest logs may not be covered yet.
+# Rerun later with --start-time of your activity hour to cover them.
+
+
+======================================================
+STEP 9. [FORENSIC] DISK ARTIFACTS WITH UTC TIMESTAMPS
+======================================================
+
+sudo TZ=UTC stat -c '%y  %n' /mnt/lab2/home/ec2-user/lab2_note.txt /mnt/lab2/home/ec2-user/.bash_history
+sudo cat /mnt/lab2/home/ec2-user/.bash_history | tail -10
+
+# TZ=UTC makes times match CloudTrail
+# lab2_note.txt time = file creation
+# .bash_history time = session close, not per-command time
+
+
+======================================================
+STEP 10. [CLOUDSHELL] HASH THE CLOUDTRAIL LOGS
+======================================================
+
+cd ~/ct
+sha256sum *.json.gz | tee ct_logs.sha256
+
+
+======================================================
+STEP 11. [FORENSIC] HASH THE LAB 2 DISK COPY
+======================================================
+
+sudo sha256sum /dev/nvme3n1p1 | tee /home/ec2-user/lab2_disk.sha256
+
+# Takes about 1 minute
+
+
+======================================================
+STEP 12. [FORENSIC] UPLOAD DISK HASH TO LOCKED BUCKET
+======================================================
+
+sudo aws s3 cp /home/ec2-user/lab2_disk.sha256 s3://test-buck-611182198012/lab2/
+
+# Needs IAM role with s3:PutObject on the evidence bucket
+
+
+======================================================
+STEP 13. [CLOUDSHELL] UPLOAD LOGS + HASH FILE
+======================================================
+
+cd ~/ct
+aws s3 cp . s3://test-buck-611182198012/lab2/cloudtrail/ --recursive

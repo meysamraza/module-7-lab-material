@@ -1,0 +1,84 @@
+======================================================
+1. FIND THE FORENSIC COPY DISK
+======================================================
+lsblk
+
+======================================================
+2. CHECK FILESYSTEM TYPE
+======================================================
+sudo file -s /dev/nvme1n1p1
+
+(Expect XFS. If ext4, use -t ext4 in the mount command.)
+
+
+======================================================
+3. MOUNT FORENSIC COPY READ-ONLY
+======================================================
+sudo mkdir -p /mnt/forensic
+sudo mount -t xfs -o ro,nouuid /dev/nvme1n1p1 /mnt/forensic
+
+(ro = read-only. nouuid = bypasses duplicate UUID error, since this is a copy of a root volume.)
+
+
+======================================================
+4. VERIFY MOUNT
+======================================================
+ls /mnt/forensic
+df -h /mnt/forensic
+
+
+======================================================
+6. FORMAT SCRATCH DISK  (DESTRUCTIVE)
+======================================================
+sudo mkfs -t xfs /dev/nvme2n1
+
+(WARNING: wipes the disk. Only run on the empty scratch disk. Never on the evidence disk nvme1n1.)
+
+
+======================================================
+7. MOUNT SCRATCH DISK
+======================================================
+sudo mkdir -p /mnt/evidence
+sudo mount /dev/nvme2n1 /mnt/evidence
+
+
+======================================================
+8. CREATE BIT-FOR-BIT DISK IMAGE
+======================================================
+sudo dd if=/dev/nvme1n1p1 of=/mnt/evidence/disk_image.dd bs=4M status=progress
+
+
+======================================================
+9. HASH THE IMAGE (SAVE THIS VALUE)
+======================================================
+sudo sha256sum /mnt/evidence/disk_image.dd
+3755b4c9175ed4d53c4ed588c542ef9db080b701a57d47e7b2568103d1842dc6	
+
+======================================================
+10. HASH THE SOURCE PARTITION (COMPARE)
+======================================================
+sudo sha256sum /dev/nvme1n1p1
+3755b4c9175ed4d53c4ed588c542ef9db080b701a57d47e7b2568103d1842dc6
+
+(Both hashes identical = image is an exact copy of the source.)
+
+
+======================================================
+11. SAVE HASH TO FILE
+======================================================
+sudo sh -c 'echo "<hash here>  disk_image.dd" > /mnt/evidence/disk_image.sha256'
+cat /mnt/evidence/disk_image.sha256
+
+(Replace <hash here> with the real value from step 9.)
+
+
+======================================================
+12. UPLOAD DISK IMAGE TO S3
+======================================================
+sudo aws s3 cp /mnt/evidence/disk_image.dd s3://test-buck-611182198012/
+
+
+======================================================
+13. UPLOAD HASH FILE TO S3
+======================================================
+sudo aws s3 cp /mnt/evidence/disk_image.sha256 s3://test-buck-611182198012/
